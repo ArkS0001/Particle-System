@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Gesture Particles</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #050505; font-family: sans-serif; color: white; }
+        
+        /* Video hidden but MUST occupy space for some mobile browsers to render frames */
+        #input-video { position: absolute; top: -9999px; left: -9999px; }
+
+        #canvas-container { width: 100vw; height: 100vh; position: absolute; top: 0; left: 0; z-index: 1; }
+
+        /* Mobile-friendly Panel */
+        #ui-panel {
+            position: absolute;
+            bottom: 30px; /* Moved to bottom for easier thumb reach on mobile */
+            left: 50%;
+            transform: translateX(-50%);
+            width: 85%;
+            max-width: 400px;
+            padding: 15px;
+            background: rgba(20, 20, 20, 0.7);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 20px;
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+            transition: opacity 0.3s;
+        }
+
+        /* Hide UI when interacting to see full effect */
+        body:active #ui-panel { opacity: 0.2; }
+
+        .row { display: flex; gap: 10px; align-items: center; }
+        select { flex-grow: 1; padding: 12px; border-radius: 10px; border: none; background: rgba(255,255,255,0.1); color: white; font-size: 1rem; }
+        input[type="color"] { width: 50px; height: 45px; border: none; background: none; padding: 0; }
+        
+        .status { font-size: 0.8rem; color: #aaa; text-align: center; margin-top: 5px; }
+        .status.active { color: #4cd137; font-weight: bold; }
+
+        #loading {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            z-index: 20; font-size: 1.2rem; background: rgba(0,0,0,0.8); padding: 20px; border-radius: 10px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="loading">Starting Camera...</div>
+
+    <!-- UI Panel -->
+    <div id="ui-panel">
+        <div class="row">
+            <select id="shape-selector">
+                <option value="heart">Heart</option>
+                <option value="flower">Flower</option>
+                <option value="saturn">Saturn</option>
+                <option value="buddha">Meditating</option>
+                <option value="fireworks">Fireworks</option>
+            </select>
+            <input type="color" id="color-picker" value="#00ffff">
+        </div>
+        <div id="hand-status" class="status">Show hand to camera to control</div>
+    </div>
+
+    <!-- Video Input: playsinline is CRITICAL for iOS -->
+    <video id="input-video" playsinline webkit-playsinline muted autoplay></video>
+    
+    <div id="canvas-container"></div>
+
+    <!-- Scripts -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <script>
+        // --- Mobile Optimization ---
+        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+        const PARTICLE_COUNT = isMobile ? 6000 : 15000; // Reduce particles on mobile for FPS
+        const PARTICLE_SIZE = isMobile ? 0.25 : 0.15;   // Make them slightly bigger on mobile
+
+        let currentShape = 'heart';
+        let handExpansionFactor = 1.0;
+        let targetColor = new THREE.Color(0x00ffff);
+
+        // --- Three.js Setup ---
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x050505, 0.02);
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.z = 30;
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Cap pixel ratio for performance
+        document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+        // --- Particles ---
+        const particlesGeometry = new THREE.BufferGeometry();
+        const positions = new Float32Array(PARTICLE_COUNT * 3);
+        const targetPositions = new Float32Array(PARTICLE_COUNT * 3);
+        
+        for(let i=0; i<PARTICLE_COUNT * 3; i++) {
+            positions[i] = (Math.random() - 0.5) * 50;
+            targetPositions[i] = positions[i];
+        }
+        particlesGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+        const getTexture = () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = 32; canvas.height = 32;
+            const ctx = canvas.getContext('2d');
+            const grad = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+            grad.addColorStop(0, 'rgba(255,255,255,1)');
+            grad.addColorStop(0.2, 'rgba(255,255,255,0.8)');
+            grad.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, 32, 32);
+            return new THREE.Texture(canvas);
+        };
+        
+        const tex = getTexture();
+        tex.needsUpdate = true;
+
+        const particlesMaterial = new THREE.PointsMaterial({
+            color: targetColor,
+            size: PARTICLE_SIZE,
+            map: tex,
+            transparent: true,
+            opacity: 0.8,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false
+        });
+
+        const particleSystem = new THREE.Points(particlesGeometry, particlesMaterial);
+        scene.add(particleSystem);
+
+        // --- Shapes ---
+        function calculateShape(type) {
+            const arr = new Float32Array(PARTICLE_COUNT * 3);
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const i3 = i * 3;
+                let x, y, z;
+                
+                // Simplified Math for Brevity
+                if (type === 'heart') {
+                    const t = Math.random() * Math.PI * 2;
+                    x = 16 * Math.pow(Math.sin(t), 3);
+                    y = 13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t);
+                    z = (Math.random() - 0.5) * 10;
+                    x *= 0.8; y *= 0.8;
+                } else if (type === 'flower') {
+                    const theta = Math.random() * Math.PI * 2, phi = Math.random() * Math.PI;
+                    const r = 10 * Math.cos(4 * theta) + 5; 
+                    x = r * Math.sin(phi) * Math.cos(theta);
+                    y = r * Math.sin(phi) * Math.sin(theta);
+                    z = (r * Math.cos(phi)) * 0.5;
+                } else if (type === 'saturn') {
+                    if(Math.random() > 0.4) {
+                        const angle = Math.random() * Math.PI * 2, dist = 12 + Math.random() * 8;
+                        x = Math.cos(angle) * dist; z = Math.sin(angle) * dist; y = (Math.random()-0.5);
+                        let _x = x; x = x * Math.cos(0.5) - y * Math.sin(0.5); y = _x * Math.sin(0.5) + y * Math.cos(0.5);
+                    } else {
+                        const r = 8 * Math.cbrt(Math.random()), theta = Math.random() * Math.PI * 2, phi = Math.acos(2 * Math.random() - 1);
+                        x = r * Math.sin(phi) * Math.cos(theta); y = r * Math.sin(phi) * Math.sin(theta); z = r * Math.cos(phi);
+                    }
+                } else if (type === 'buddha') {
+                    const s = Math.random();
+                    if(s < 0.2) { // Head
+                        const r = 2.5 * Math.cbrt(Math.random()), u = Math.random()*6.28, v = Math.acos(2*Math.random()-1);
+                        x = r*Math.sin(v)*Math.cos(u); y = r*Math.sin(v)*Math.sin(u) + 8; z = r*Math.cos(v);
+                    } else if (s < 0.6) { // Body
+                        const h = Math.random()*8, r = 4-(h*0.2), ang = Math.random()*6.28, rad = r*Math.sqrt(Math.random());
+                        x = rad*Math.cos(ang); y = h; z = rad*Math.sin(ang);
+                    } else { // Legs
+                        const r = 7*Math.cbrt(Math.random()), u = Math.random()*6.28, v = Math.acos(2*Math.random()-1);
+                        x = r*Math.sin(v)*Math.cos(u)*1.5; y = (r*Math.sin(v)*Math.sin(u))*0.5 - 2; z = r*Math.cos(v);
+                    }
+                } else { // Fireworks
+                    const r = 15 * Math.cbrt(Math.random()), theta = Math.random() * Math.PI * 2, phi = Math.acos(2 * Math.random() - 1);
+                    x = r * Math.sin(phi) * Math.cos(theta); y = r * Math.sin(phi) * Math.sin(theta); z = r * Math.cos(phi);
+                }
+                arr[i3] = x; arr[i3+1] = y; arr[i3+2] = z;
+            }
+            return arr;
+        }
+
+        function updateTargetShape() {
+            const newPos = calculateShape(currentShape);
+            for(let i=0; i<targetPositions.length; i++) targetPositions[i] = newPos[i];
+        }
+        updateTargetShape();
+
+        // --- MediaPipe Hand Tracking ---
+        const videoElement = document.getElementById('input-video');
+        const statusElement = document.getElementById('hand-status');
+
+        function onResults(results) {
+            document.getElementById('loading').style.display = 'none';
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                statusElement.innerText = "Hand Detected - Pinch to shrink!";
+                statusElement.classList.add('active');
+                
+                const lm = results.multiHandLandmarks[0];
+                const dist = Math.sqrt(Math.pow(lm[8].x - lm[4].x, 2) + Math.pow(lm[8].y - lm[4].y, 2));
+                
+                let factor = (dist - 0.02) * 8; 
+                if (factor < 0.2) factor = 0.2; 
+                if (factor > 2.5) factor = 2.5;
+                handExpansionFactor += (factor - handExpansionFactor) * 0.1;
+            } else {
+                statusElement.innerText = "Waiting for hand...";
+                statusElement.classList.remove('active');
+                handExpansionFactor += (1.0 - handExpansionFactor) * 0.05;
+            }
+        }
+
+        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: isMobile ? 0 : 1, // Use lighter model (0) on mobile
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+        hands.onResults(onResults);
+
+        const cameraUtils = new Camera(videoElement, {
+            onFrame: async () => { await hands.send({image: videoElement}); },
+            width: isMobile ? 320 : 640,  // Lower resolution for mobile processing
+            height: isMobile ? 240 : 480
+        });
+        cameraUtils.start();
+
+        // --- Interaction ---
+        document.getElementById('shape-selector').addEventListener('change', (e) => { currentShape = e.target.value; updateTargetShape(); });
+        document.getElementById('color-picker').addEventListener('input', (e) => { targetColor.set(e.target.value); particlesMaterial.color = targetColor; });
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // --- Loop ---
+        let time = 0;
+        function animate() {
+            requestAnimationFrame(animate);
+            time += 0.01;
+            particleSystem.rotation.y = time * 0.1;
+
+            const currentPos = particlesGeometry.attributes.position.array;
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const i3 = i * 3;
+                const tx = targetPositions[i3], ty = targetPositions[i3+1], tz = targetPositions[i3+2];
+                const sx = tx * handExpansionFactor, sy = ty * handExpansionFactor, sz = tz * handExpansionFactor;
+                
+                currentPos[i3] += (sx - currentPos[i3]) * 0.08;
+                currentPos[i3+1] += (sy - currentPos[i3+1]) * 0.08;
+                currentPos[i3+2] += (sz - currentPos[i3+2]) * 0.08;
+
+                if(currentShape === 'fireworks') {
+                     currentPos[i3+1] -= 0.02; 
+                     if(currentPos[i3+1] < -20) currentPos[i3+1] = 20;
+                }
+            }
+            particlesGeometry.attributes.position.needsUpdate = true;
+            renderer.render(scene, camera);
+        }
+        animate();
+    </script>
+</body>
+</html>
